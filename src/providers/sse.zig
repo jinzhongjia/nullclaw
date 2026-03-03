@@ -104,6 +104,18 @@ pub fn curlStream(
     argv_buf[argc] = "Content-Type: application/json";
     argc += 1;
 
+    // Add proxy from environment if set
+    const http_util = @import("../http_util.zig");
+    const proxy = http_util.getProxyFromEnv(allocator) catch null;
+    defer if (proxy) |p| allocator.free(p);
+
+    if (proxy) |p| {
+        argv_buf[argc] = "--proxy";
+        argc += 1;
+        argv_buf[argc] = p;
+        argc += 1;
+    }
+
     if (auth_header) |auth| {
         argv_buf[argc] = "-H";
         argc += 1;

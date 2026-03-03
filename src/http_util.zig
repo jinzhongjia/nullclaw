@@ -418,6 +418,20 @@ pub fn curlGet(allocator: Allocator, url: []const u8, headers: []const []const u
     return curlGetWithProxy(allocator, url, headers, timeout_secs, null);
 }
 
+/// Read proxy URL from standard environment variables.
+/// Checks HTTPS_PROXY, HTTP_PROXY, ALL_PROXY in that order.
+/// Returns null if no proxy is set.
+/// Caller owns returned memory.
+pub fn getProxyFromEnv(allocator: Allocator) !?[]const u8 {
+    const env_vars = [_][]const u8{ "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY" };
+    for (env_vars) |var_name| {
+        if (std.process.getEnvVarOwned(allocator, var_name)) |val| {
+            return val;
+        } else |_| {}
+    }
+    return null;
+}
+
 /// HTTP GET via curl for SSE (Server-Sent Events).
 ///
 /// Uses -N (--no-buffer) to disable output buffering, allowing
