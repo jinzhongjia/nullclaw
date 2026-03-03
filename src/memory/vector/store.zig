@@ -113,6 +113,58 @@ pub const SqliteSharedVectorStore = struct {
 
     // ── vtable implementations ────────────────────────────────────
 
+    fn queryNorm(query_embedding: []const f32) f64 {
+        if (query_embedding.len == 0) return 0.0;
+
+        var norm_sq: f64 = 0.0;
+        for (query_embedding) |q_raw| {
+            const q: f64 = @floatCast(q_raw);
+            norm_sq += q * q;
+        }
+        return @sqrt(norm_sq);
+    }
+
+    fn cosineSimilarityBlob(query_embedding: []const f32, query_norm: f64, blob: []const u8) f32 {
+        if (query_embedding.len == 0) return 0.0;
+        if (blob.len != query_embedding.len * 4) return 0.0;
+        if (!std.math.isFinite(query_norm) or query_norm < std.math.floatEps(f64)) return 0.0;
+
+        var dot: f64 = 0.0;
+        var norm_blob_sq: f64 = 0.0;
+
+        for (query_embedding, 0..) |q_raw, i| {
+            const chunk = blob[i * 4 ..][0..4];
+            const blob_val: f32 = @bitCast(chunk.*);
+
+            const q: f64 = @floatCast(q_raw);
+            const b: f64 = @floatCast(blob_val);
+            dot += q * b;
+            norm_blob_sq += b * b;
+        }
+
+        const denom = query_norm * @sqrt(norm_blob_sq);
+        if (!std.math.isFinite(denom) or denom < std.math.floatEps(f64)) return 0.0;
+
+        const raw = dot / denom;
+        if (!std.math.isFinite(raw)) return 0.0;
+
+        const clamped = @max(0.0, @min(1.0, raw));
+        return @floatCast(clamped);
+    }
+
+    fn indexOfLowestScore(results: []const VectorResult) usize {
+        if (results.len == 0) return 0;
+        var idx: usize = 0;
+        var score = results[0].score;
+        for (results[1..], 1..) |r, i| {
+            if (r.score < score) {
+                score = r.score;
+                idx = i;
+            }
+        }
+        return idx;
+    }
+
     fn implUpsert(ptr: *anyopaque, key: []const u8, embedding: []const f32) anyerror!void {
         const self: *Self = @ptrCast(@alignCast(ptr));
 
@@ -134,6 +186,10 @@ pub const SqliteSharedVectorStore = struct {
 
     fn implSearch(ptr: *anyopaque, alloc: Allocator, query_embedding: []const f32, limit: u32) anyerror![]VectorResult {
         const self: *Self = @ptrCast(@alignCast(ptr));
+        const max_results: usize = @intCast(limit);
+        if (max_results == 0) return alloc.alloc(VectorResult, 0);
+
+        const query_norm = queryNorm(query_embedding);
 
         const sql = "SELECT memory_key, embedding FROM memory_embeddings";
         var stmt: ?*c.sqlite3_stmt = null;
@@ -141,11 +197,14 @@ pub const SqliteSharedVectorStore = struct {
         if (rc != c.SQLITE_OK) return error.PrepareFailed;
         defer _ = c.sqlite3_finalize(stmt);
 
-        var candidates: std.ArrayList(VectorResult) = .empty;
+        var candidates: std.ArrayListUnmanaged(VectorResult) = .empty;
         errdefer {
             for (candidates.items) |*r| r.deinit(alloc);
             candidates.deinit(alloc);
         }
+
+        var lowest_idx: usize = 0;
+        var lowest_score: f32 = 0.0;
 
         while (true) {
             rc = c.sqlite3_step(stmt);
@@ -161,19 +220,39 @@ pub const SqliteSharedVectorStore = struct {
 
                 if (blob_ptr == null or blob_len == 0) continue;
 
-                const row_vec = try vector.bytesToVec(alloc, blob_ptr.?[0..blob_len]);
-                defer alloc.free(row_vec);
+                const score = cosineSimilarityBlob(query_embedding, query_norm, blob_ptr.?[0..blob_len]);
 
-                const score = vector.cosineSimilarity(query_embedding, row_vec);
-                const owned_key = try alloc.dupe(u8, key_ptr[0..key_len]);
-                errdefer alloc.free(owned_key);
+                if (candidates.items.len < max_results) {
+                    const owned_key = try alloc.dupe(u8, key_ptr[0..key_len]);
+                    errdefer alloc.free(owned_key);
 
-                try candidates.append(alloc, .{
-                    .key = owned_key,
-                    .score = score,
-                });
+                    try candidates.append(alloc, .{
+                        .key = owned_key,
+                        .score = score,
+                    });
+                    if (candidates.items.len == 1 or score < lowest_score) {
+                        lowest_idx = candidates.items.len - 1;
+                        lowest_score = score;
+                    }
+                } else {
+                    if (score <= lowest_score) continue;
+
+                    const owned_key = try alloc.dupe(u8, key_ptr[0..key_len]);
+                    errdefer alloc.free(owned_key);
+
+                    candidates.items[lowest_idx].deinit(alloc);
+                    candidates.items[lowest_idx] = .{
+                        .key = owned_key,
+                        .score = score,
+                    };
+
+                    lowest_idx = indexOfLowestScore(candidates.items);
+                    lowest_score = candidates.items[lowest_idx].score;
+                }
             } else break;
         }
+
+        if (rc != c.SQLITE_DONE) return error.StepFailed;
 
         // Sort by score descending
         std.mem.sortUnstable(VectorResult, candidates.items, {}, struct {
@@ -182,14 +261,8 @@ pub const SqliteSharedVectorStore = struct {
             }
         }.lessThan);
 
-        // Truncate to limit
-        const actual_limit = @min(@as(usize, limit), candidates.items.len);
-
-        // Free excess results beyond the limit
-        for (candidates.items[actual_limit..]) |*r| r.deinit(alloc);
-
-        // Shrink the list and return owned slice
-        const result = try alloc.dupe(VectorResult, candidates.items[0..actual_limit]);
+        // Return owned slice
+        const result = try alloc.dupe(VectorResult, candidates.items);
         candidates.deinit(alloc);
         return result;
     }
@@ -552,6 +625,33 @@ test "cosine similarity cross-check: exact match returns score near 1.0" {
     try std.testing.expectEqual(@as(usize, 1), results.len);
     try std.testing.expectEqualStrings("exact", results[0].key);
     try std.testing.expect(@abs(results[0].score - 1.0) < 0.001);
+}
+
+test "blob cosine similarity matches math cosine similarity" {
+    const emb = [_]f32{ 0.25, 0.5, 0.75, 1.0 };
+    const query = [_]f32{ 0.1, 0.2, 0.3, 0.4 };
+
+    const blob = try vector.vecToBytes(std.testing.allocator, &emb);
+    defer std.testing.allocator.free(blob);
+
+    const expected = vector.cosineSimilarity(&query, &emb);
+    const query_norm = SqliteSharedVectorStore.queryNorm(&query);
+    const actual = SqliteSharedVectorStore.cosineSimilarityBlob(&query, query_norm, blob);
+    try std.testing.expect(@abs(expected - actual) < 0.0001);
+}
+
+test "search with zero limit returns empty" {
+    var mem = try sqlite_mod.SqliteMemory.init(std.testing.allocator, ":memory:");
+    defer mem.deinit();
+
+    var vs = SqliteSharedVectorStore.init(std.testing.allocator, mem.db);
+    defer vs.deinit();
+    const s = vs.store();
+
+    try s.upsert("k1", &[_]f32{ 1.0, 0.0, 0.0 });
+    const results = try s.search(std.testing.allocator, &[_]f32{ 1.0, 0.0, 0.0 }, 0);
+    defer freeVectorResults(std.testing.allocator, results);
+    try std.testing.expectEqual(@as(usize, 0), results.len);
 }
 
 test "round-trip: upsert then search finds the key" {
