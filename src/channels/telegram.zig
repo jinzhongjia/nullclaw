@@ -2532,6 +2532,7 @@ pub const TelegramChannel = struct {
     pub const StreamCtx = struct {
         tg_ptr: *TelegramChannel,
         chat_id: []const u8,
+        filter: streaming.TagFilter = undefined,
     };
 
     fn streamCallback(ctx_ptr: *anyopaque, event: streaming.Event) void {
@@ -2542,12 +2543,15 @@ pub const TelegramChannel = struct {
 
     /// Build a streaming sink backed by the given context.
     /// Returns null if streaming is disabled. Caller owns the lifetime of `ctx`.
+    /// Chunks are filtered through a TagFilter to strip tool_call markup.
     pub fn makeSink(self: *TelegramChannel, ctx: *StreamCtx) ?streaming.Sink {
         if (!self.streaming_enabled) return null;
-        return streaming.Sink{
+        const raw = streaming.Sink{
             .callback = streamCallback,
             .ctx = @ptrCast(ctx),
         };
+        ctx.filter = streaming.TagFilter.init(raw);
+        return ctx.filter.sink();
     }
 };
 
