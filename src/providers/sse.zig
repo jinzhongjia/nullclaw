@@ -161,7 +161,9 @@ pub fn extractDeltaContent(allocator: std.mem.Allocator, json_str: []const u8) !
 
 /// Run curl in SSE streaming mode and parse output line by line.
 ///
-/// Spawns `curl -s --no-buffer --fail-with-body` and reads stdout incrementally.
+/// Spawns `curl -s --no-buffer -f` and reads stdout incrementally.
+/// `-f` is used instead of `--fail-with-body` for compatibility with older
+/// curl releases still common on LTS distributions.
 /// For each SSE delta, calls `callback(ctx, chunk)`.
 /// Returns accumulated result after stream completes.
 pub fn curlStream(
@@ -188,7 +190,7 @@ pub fn curlStream(
     argc += 1;
     argv_buf[argc] = "--no-buffer";
     argc += 1;
-    argv_buf[argc] = "--fail-with-body";
+    argv_buf[argc] = "-f";
     argc += 1;
 
     var timeout_buf: [32]u8 = undefined;
