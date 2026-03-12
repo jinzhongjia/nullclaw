@@ -530,7 +530,8 @@ pub fn deinitTools(allocator: std.mem.Allocator, tools: []const Tool) void {
 }
 
 /// Create restricted tool set for subagents.
-/// Includes: shell, file_read, file_write, file_edit, git, http (if enabled).
+/// Includes: shell, file_read, file_write, file_edit, file_read_hashed,
+/// file_edit_hashed, git, http (if enabled).
 /// Excludes: message, spawn, delegate, schedule, memory, composio, browser —
 /// to prevent infinite loops and cross-channel side effects.
 pub fn subagentTools(
@@ -883,6 +884,8 @@ test "subagent tools use configured shell and file limits" {
     var saw_shell = false;
     var saw_file_read = false;
     var saw_file_edit = false;
+    var saw_file_read_hashed = false;
+    var saw_file_edit_hashed = false;
     for (tools) |t| {
         if (std.mem.eql(u8, t.name(), "shell")) {
             const st: *shell.ShellTool = @ptrCast(@alignCast(t.ptr));
@@ -901,12 +904,26 @@ test "subagent tools use configured shell and file limits" {
             const et: *file_edit.FileEditTool = @ptrCast(@alignCast(t.ptr));
             try std.testing.expectEqual(@as(usize, 4096), et.max_file_size);
             saw_file_edit = true;
+            continue;
+        }
+        if (std.mem.eql(u8, t.name(), "file_read_hashed")) {
+            const ft: *file_read_hashed.FileReadHashedTool = @ptrCast(@alignCast(t.ptr));
+            try std.testing.expectEqual(@as(u64, 4096), ft.max_file_size);
+            saw_file_read_hashed = true;
+            continue;
+        }
+        if (std.mem.eql(u8, t.name(), "file_edit_hashed")) {
+            const et: *file_edit_hashed.FileEditHashedTool = @ptrCast(@alignCast(t.ptr));
+            try std.testing.expectEqual(@as(usize, 4096), et.max_file_size);
+            saw_file_edit_hashed = true;
         }
     }
 
     try std.testing.expect(saw_shell);
     try std.testing.expect(saw_file_read);
     try std.testing.expect(saw_file_edit);
+    try std.testing.expect(saw_file_read_hashed);
+    try std.testing.expect(saw_file_edit_hashed);
 }
 
 test "subagent tools wire http allowlist and response limit" {
